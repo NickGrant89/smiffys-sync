@@ -1,0 +1,31 @@
+# Logs
+logs/
+failed_product_uploads_*.log
+main_sync_*.log
+product_sync_*.log
+order_sync_*.log
+
+# Cache
+cache/
+images/
+images.old1/
+password.md
+
+# Node.js build artifacts
+node_modules/
+dist/
+*.log
+
+# Environment variables
+.env
+config.json
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+*.sublime-workspace
+*.sublime-project
+.vscode/

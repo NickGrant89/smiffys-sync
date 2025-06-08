@@ -1,0 +1,29 @@
+{
+  "name": "smiffys-sync",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@shopify/shopify-api": "^11.11.1",
+    "axios": "^1.8.4",
+    "bluebird": "^3.7.2",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongodb": "^6.15.0",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.10.0",
+    "proper-lockfile": "^4.1.2",
+    "pug": "^3.0.3",
+    "shopify-api-node": "^3.14.2",
+    "string-similarity": "^4.0.4",
+    "strong-soap": "^4.1.10",
+    "winston": "^3.17.0",
+    "xml2js": "^0.6.2"
+  }
+}
