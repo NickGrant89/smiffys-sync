@@ -4,6 +4,7 @@ failed_product_uploads_*.log
 main_sync_*.log
 product_sync_*.log
 order_sync_*.log
+.env
 
 # Cache
 cache/

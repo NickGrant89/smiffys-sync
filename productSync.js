@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const Shopify = require('shopify-api-node');
 const winston = require('winston');
 const soap = require('strong-soap').soap;
@@ -5,42 +7,64 @@ const fs = require('fs').promises;
 const path = require('path');
 const nodemailer = require('nodemailer');
 const { MongoClient } = require('mongodb');
-const config = require('./config.json');
 const { promisify } = require('util');
 const setTimeoutPromise = promisify(setTimeout);
 const Promise = require('bluebird');
 
-// Configuration from config.json
-const SMIFFYS_API_KEY = config.smiffys.apiKey;
-const SMIFFYS_CLIENT_ID = config.smiffys.clientId;
-const SMIFFYS_PRODUCTS_URL = config.smiffys.productsUrl;
-const SMIFFYS_ORDERS_URL = config.smiffys.ordersUrl;
-const SHOPIFY_ACCESS_TOKEN = config.shopify.accessToken;
-const SHOPIFY_STORE_NAME = config.shopify.storeName;
-const IMAGE_DIR = config.imageDir;
-const MONGODB_CONNECTION_STRING = config.mongodb.connectionString;
+require('dotenv').config();
 
-// Email configuration from config.json
-const SMTP_HOST = config.email.smtpHost;
-const SMTP_PORT = config.email.smtpPort;
-const SENDER_EMAIL = config.email.senderEmail;
-const SENDER_PASSWORD = config.email.senderPassword;
-const RECIPIENT_EMAIL = config.email.recipientEmail;
-const EMAIL_SUBJECT_TEMPLATE = config.email.subject;
+// Debug environment variables
+console.log('Loaded environment variables:', {
+  SMIFFYS_API_KEY: process.env.SMIFFYS_API_KEY,
+  SMIFFYS_CLIENT_ID: process.env.SMIFFYS_CLIENT_ID,
+  SMIFFYS_PRODUCTS_URL: process.env.SMIFFYS_PRODUCTS_URL,
+  SMIFFYS_ORDERS_URL: process.env.SMIFFYS_ORDERS_URL,
+  SHOPIFY_ACCESS_TOKEN: process.env.SHOPIFY_ACCESS_TOKEN,
+  SHOPIFY_STORE_NAME: process.env.SHOPIFY_STORE_NAME,
+  IMAGE_DIR: process.env.IMAGE_DIR,
+  MONGODB_CONNECTION_STRING: process.env.MONGODB_CONNECTION_STRING,
+  EMAIL_SMTP_HOST: process.env.EMAIL_SMTP_HOST,
+  EMAIL_SMTP_PORT: process.env.EMAIL_SMTP_PORT,
+  EMAIL_SENDER_EMAIL: process.env.EMAIL_SENDER_EMAIL,
+  EMAIL_SENDER_PASSWORD: process.env.EMAIL_SENDER_PASSWORD,
+  EMAIL_RECIPIENT_EMAIL: process.env.EMAIL_RECIPIENT_EMAIL,
+  EMAIL_SUBJECT: process.env.EMAIL_SUBJECT
+});
 
-let collectionIds = {};
+const config = {
+  smiffys: {
+    apiKey: process.env.SMIFFYS_API_KEY,
+    clientId: process.env.SMIFFYS_CLIENT_ID,
+    productsUrl: process.env.SMIFFYS_PRODUCTS_URL,
+    ordersUrl: process.env.SMIFFYS_ORDERS_URL
+  },
+  shopify: {
+    accessToken: process.env.SHOPIFY_ACCESS_TOKEN,
+    storeName: process.env.SHOPIFY_STORE_NAME
+  },
+  imageDir: process.env.IMAGE_DIR,
+  mongodb: {
+    connectionString: process.env.MONGODB_CONNECTION_STRING
+  },
+  email: {
+    smtpHost: process.env.EMAIL_SMTP_HOST,
+    smtpPort: parseInt(process.env.EMAIL_SMTP_PORT, 10),
+    senderEmail: process.env.EMAIL_SENDER_EMAIL,
+    senderPassword: process.env.EMAIL_SENDER_PASSWORD,
+    recipientEmail: process.env.EMAIL_RECIPIENT_EMAIL,
+    subject: process.env.EMAIL_SUBJECT.replace('{{timestamp}}', new Date().toISOString().replace(/:/g, '-').split('.')[0])
+  }
+};
 
 // Validate configuration
-if (!SMIFFYS_ORDERS_URL) {
-  throw new Error('SMIFFYS_ORDERS_URL is not defined in config.json.');
+if (!config.smiffys.ordersUrl) {
+  throw new Error('SMIFFYS_ORDERS_URL is not defined in .env.');
 }
-
-if (!SMTP_HOST || !SMTP_PORT || !SENDER_EMAIL || !SENDER_PASSWORD || !RECIPIENT_EMAIL || !EMAIL_SUBJECT_TEMPLATE) {
-  throw new Error('Email configuration is incomplete in config.json.');
+if (!config.email.smtpHost || !config.email.smtpPort || !config.email.senderEmail || !config.email.senderPassword || !config.email.recipientEmail || !config.email.subject) {
+  throw new Error('Email configuration is incomplete in .env.');
 }
-
-if (!MONGODB_CONNECTION_STRING) {
-  throw new Error('MongoDB connection string is not defined in config.json.');
+if (!config.mongodb.connectionString) {
+  throw new Error('MongoDB connection string is not defined in .env.');
 }
 
 // Constants
@@ -81,72 +105,53 @@ const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
 
 // Logger setup with separate log files
 const loggerConfig = {
-  level: 'debug', // Set to 'debug' for detailed logs
+  level: 'debug',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.printf(({ timestamp, level, message }) => `${timestamp} - ${level}: ${message}`)
   )
 };
 
-// Main logger for general messages
 const mainLogger = winston.createLogger({
   ...loggerConfig,
   transports: [
-    new winston.transports.File({
-      filename: path.join(LOGS_DIR, `main_sync_${timestamp}.log`),
-      handleExceptions: true,
-      handleRejections: true
-    }),
+    new winston.transports.File({ filename: path.join(LOGS_DIR, `main_sync_${timestamp}.log`), handleExceptions: true, handleRejections: true }),
     new winston.transports.Console()
   ]
 });
 
-// Logger for product sync
 const productSyncLogger = winston.createLogger({
   ...loggerConfig,
   transports: [
-    new winston.transports.File({
-      filename: path.join(LOGS_DIR, `product_sync_${timestamp}.log`),
-      handleExceptions: true,
-      handleRejections: true
-    }),
+    new winston.transports.File({ filename: path.join(LOGS_DIR, `product_sync_${timestamp}.log`), handleExceptions: true, handleRejections: true }),
     new winston.transports.Console()
   ]
 });
 
-// Logger for order sync
 const orderSyncLogger = winston.createLogger({
   ...loggerConfig,
   transports: [
-    new winston.transports.File({
-      filename: path.join(LOGS_DIR, `order_sync_${timestamp}.log`),
-      handleExceptions: true,
-      handleRejections: true
-    }),
+    new winston.transports.File({ filename: path.join(LOGS_DIR, `order_sync_${timestamp}.log`), handleExceptions: true, handleRejections: true }),
     new winston.transports.Console()
   ]
 });
 
-// Shopify API setup with increased rate limit
 const shopify = new Shopify({
-  shopName: SHOPIFY_STORE_NAME,
-  accessToken: SHOPIFY_ACCESS_TOKEN,
+  shopName: config.shopify.storeName,
+  accessToken: config.shopify.accessToken,
   apiVersion: '2025-01',
   autoLimit: { calls: 2, interval: 1000, bucketSize: 40 },
   timeout: 120000
 });
 
-// MongoDB setup
 let mongoClient;
 let productMappingCollection;
-
-// Track changed mappings for MongoDB writes
 let changedMappings = {};
 
 async function connectToMongoDB() {
   try {
     if (!mongoClient) {
-      mongoClient = new MongoClient(MONGODB_CONNECTION_STRING);
+      mongoClient = new MongoClient(config.mongodb.connectionString);
       await mongoClient.connect();
       const db = mongoClient.db('smiffys_shopify');
       productMappingCollection = db.collection('product_mapping');
@@ -158,7 +163,6 @@ async function connectToMongoDB() {
   }
 }
 
-// Load product mapping from MongoDB (include last known stock levels, prices, and image filenames)
 async function loadProductMapping() {
   try {
     const mappingDocs = await productMappingCollection.find({}).toArray();
@@ -168,7 +172,7 @@ async function loadProductMapping() {
         shopifyProductId: doc.shopifyProductId,
         lastStock: doc.lastStock || {},
         lastPrices: doc.lastPrices || {},
-        lastImageFilenames: doc.lastImageFilenames || [], // Load cached image filenames
+        lastImageFilenames: doc.lastImageFilenames || [],
       };
     });
     productSyncLogger.info(`Loaded product mapping from MongoDB with ${Object.keys(mapping).length} entries`);
@@ -179,7 +183,6 @@ async function loadProductMapping() {
   }
 }
 
-// Save product mapping to MongoDB (optimized to save only changes, include stock levels, prices, and image filenames)
 async function saveProductMapping(mapping, batchNumber, totalBatches) {
   try {
     if (Object.keys(changedMappings).length === 0) {
@@ -196,7 +199,7 @@ async function saveProductMapping(mapping, batchNumber, totalBatches) {
           shopifyProductId: data.shopifyProductId,
           lastStock: data.lastStock || {},
           lastPrices: data.lastPrices || {},
-          lastImageFilenames: data.lastImageFilenames || [], // Save updated image filenames
+          lastImageFilenames: data.lastImageFilenames || [],
           updatedAt: new Date(),
         },
         upsert: true,
@@ -213,13 +216,12 @@ async function saveProductMapping(mapping, batchNumber, totalBatches) {
   }
 }
 
-// Singleton for Smiffys orders SOAP client
 let smiffysOrdersClient = null;
 
 async function getSmiffysOrdersClient() {
   if (!smiffysOrdersClient) {
     smiffysOrdersClient = await new Promise((resolve, reject) => {
-      soap.createClient(SMIFFYS_ORDERS_URL, {}, (err, client) => {
+      soap.createClient(config.smiffys.ordersUrl, {}, (err, client) => {
         if (err) {
           orderSyncLogger.error(`Failed to create SOAP client for Smiffys orders API: ${err.message}`);
           return reject(err);
@@ -232,7 +234,6 @@ async function getSmiffysOrdersClient() {
   return smiffysOrdersClient;
 }
 
-// Test Shopify connection and get location ID
 async function testShopifyConnection() {
   const start = Date.now();
   try {
@@ -253,7 +254,6 @@ async function testShopifyConnection() {
   }
 }
 
-// Fetch local images for a product (gallery support) only if needed
 async function getLocalImages(product, forceLoad = false) {
   if (!product || !product.ProductCode) {
     productSyncLogger.warn(`No valid product data provided to getLocalImages for ${product?.ProductCode || 'unknown'}`);
@@ -270,7 +270,7 @@ async function getLocalImages(product, forceLoad = false) {
   }
   const imagePromises = imageFields.map(async ({ filename, position }) => {
     if (!filename) return null;
-    const imagePath = path.join(IMAGE_DIR, filename);
+    const imagePath = path.join(config.imageDir, filename);
     try {
       await fs.access(imagePath);
       const buffer = await fs.readFile(imagePath);
@@ -289,19 +289,16 @@ async function getLocalImages(product, forceLoad = false) {
   return images;
 }
 
-// Sanitize tags to be Shopify-compatible
 function sanitizeTag(tag) {
   if (!tag) return null;
   return tag.trim().replace(/[,;:]/g, '');
 }
 
-// Round price to the nearest .99
 function roundToNearest99(price) {
   const rounded = Math.ceil(price);
   return (rounded - 0.01).toFixed(2);
 }
 
-// Fetch Smiffys products from SOAP API or file-based cache
 async function fetchSmiffysProducts() {
   const start = Date.now();
   const cacheFile = path.join(CACHE_DIR, 'smiffys_cache.json');
@@ -315,12 +312,12 @@ async function fetchSmiffysProducts() {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       products = await new Promise((resolve, reject) => {
-        soap.createClient(SMIFFYS_PRODUCTS_URL, {}, (err, client) => {
+        soap.createClient(config.smiffys.productsUrl, {}, (err, client) => {
           if (err) {
             productSyncLogger.error(`Failed to create SOAP client for Smiffys products API: ${err.message}`);
             return reject(err);
           }
-          client.GetFullDataSet({ apiKey: SMIFFYS_API_KEY, clientID: SMIFFYS_CLIENT_ID }, async (err, result) => {
+          client.GetFullDataSet({ apiKey: config.smiffys.apiKey, clientID: config.smiffys.clientId }, async (err, result) => {
             if (err) {
               productSyncLogger.error(`Failed to fetch products from Smiffys API: ${err.message}`);
               return reject(err);
@@ -352,7 +349,6 @@ async function fetchSmiffysProducts() {
   throw lastError;
 }
 
-// Helper function to determine audience
 function determineAudience(rawAudience) {
   const audienceUpper = (rawAudience || '').trim().toUpperCase();
   if (['CHILD', 'KID', 'KIDS', 'YOUTH', 'JUNIOR', 'CHILDREN'].includes(audienceUpper)) {
@@ -363,7 +359,6 @@ function determineAudience(rawAudience) {
   return 'Unspecified';
 }
 
-// Transform Smiffys products to Shopify format with image gallery
 async function transformSmiffysToShopify(smiffysProducts) {
   const start = Date.now();
   const productMap = new Map();
@@ -478,8 +473,7 @@ async function transformSmiffysToShopify(smiffysProducts) {
       const description = (product.WebDescription || product.BrochureDescription || 'No description available').replace(/[^a-zA-Z0-9\s.,-]/g, '').substring(0, 10000);
       const finalTitle = audience === 'Adult' ? title : `${audience} ${title}`;
 
-      // Load images with full data initially to populate cache
-      const images = await getLocalImages(product, true); // Force full load on first pass
+      const images = await getLocalImages(product, true);
       const imageFilenames = images.map(img => img.filename);
 
       productMap.set(groupingCode, {
@@ -496,8 +490,8 @@ async function transformSmiffysToShopify(smiffysProducts) {
         rawGender,
         stockMap: {},
         priceMap: {},
-        images: images, // Attach initial image data
-        originalProduct: product, // Store original product data for getLocalImages
+        images,
+        originalProduct: product,
       });
 
       collectionNames.add(catalogueName);
@@ -515,7 +509,7 @@ async function transformSmiffysToShopify(smiffysProducts) {
     const variant = {
       sku: fullSku,
       barcode: product.BarCode || '',
-      price: price,
+      price,
       inventory_quantity: stock,
       inventory_management: 'shopify',
       weight: parseFloat(product.unit_weight || 0) || 0.02,
@@ -578,7 +572,6 @@ async function transformSmiffysToShopify(smiffysProducts) {
   return shopifyProducts;
 }
 
-// Retry logic for Shopify API calls with exponential backoff
 async function withRetry(fn, retries = 5, baseDelay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -601,7 +594,6 @@ async function withRetry(fn, retries = 5, baseDelay = 2000) {
   }
 }
 
-// Clean up duplicates in Shopify based on smiffys_generic_code tags
 async function cleanUpDuplicates() {
   const start = Date.now();
   productSyncLogger.info('Starting duplicate cleanup');
@@ -662,7 +654,6 @@ async function cleanUpDuplicates() {
   productSyncLogger.info(`Duplicate cleanup completed, processed ${allProducts.length} products in ${(Date.now() - start) / 1000}s`);
 }
 
-// Remove products no longer in Smiffys feed
 async function removeDiscontinuedProducts(currentGenericCodes) {
   const start = Date.now();
   productSyncLogger.info('Starting discontinued products cleanup');
@@ -680,7 +671,6 @@ async function removeDiscontinuedProducts(currentGenericCodes) {
       await withRetry(() => shopify.product.delete(productId));
       productSyncLogger.info(`Removed discontinued product ${genericCode} (Shopify ID: ${productId})`);
       
-      // Remove from MongoDB mapping
       await productMappingCollection.deleteOne({ genericCode });
       delete globalProductMapping[genericCode];
       delete changedMappings[genericCode];
@@ -694,7 +684,6 @@ async function removeDiscontinuedProducts(currentGenericCodes) {
   productSyncLogger.info(`Discontinued products cleanup completed in ${(Date.now() - start) / 1000}s`);
 }
 
-// Fetch existing Shopify products using the product mapping and tags (optimized with bulk fetching)
 async function fetchExistingProducts(productsToSync) {
   const start = Date.now();
   const genericCodes = new Set(productsToSync.map(p => p.genericCode));
@@ -703,7 +692,6 @@ async function fetchExistingProducts(productsToSync) {
   let globalProductMapping = await loadProductMapping();
   const unmappedGenericCodes = new Set(genericCodes);
 
-  // Clean up PENDING entries in MongoDB
   const pendingEntries = Object.entries(globalProductMapping).filter(
     ([_, mapping]) => mapping.shopifyProductId === 'PENDING'
   );
@@ -716,7 +704,6 @@ async function fetchExistingProducts(productsToSync) {
     productSyncLogger.info(`Removed ${pendingEntries.length} PENDING mappings from MongoDB`);
   }
 
-  // Step 1: Bulk fetch products by ID from the mapping
   const mappedGenericCodes = Array.from(genericCodes).filter(code => globalProductMapping[code]?.shopifyProductId && globalProductMapping[code].shopifyProductId !== 'PENDING');
   for (let i = 0; i < mappedGenericCodes.length; i += BULK_FETCH_SIZE) {
     const batchCodes = mappedGenericCodes.slice(i, i + BULK_FETCH_SIZE);
@@ -739,7 +726,6 @@ async function fetchExistingProducts(productsToSync) {
           productSyncLogger.info(`Found product for genericCode ${genericCode} in mapping: Shopify ID ${product.id}, Title: ${product.title}, Tags: ${product.tags}, Status: ${product.status}, Images: ${product.images?.length || 0}`);
         }
       }
-      // Remove invalid mappings
       batchCodes.forEach(code => {
         if (!existingProducts.has(code)) {
           productSyncLogger.warn(`Product ID ${globalProductMapping[code].shopifyProductId} from mapping for genericCode ${code} not found in Shopify`);
@@ -751,7 +737,6 @@ async function fetchExistingProducts(productsToSync) {
     }
   }
 
-  // Step 2: Fetch unmapped products using tag search
   if (unmappedGenericCodes.size > 0) {
     productSyncLogger.info(`Searching Shopify for ${unmappedGenericCodes.size} unmapped generic codes`);
     const genericCodeTags = Array.from(unmappedGenericCodes).map(code => `smiffys_generic_code:${code}`);
@@ -765,7 +750,7 @@ async function fetchExistingProducts(productsToSync) {
       try {
         const products = await withRetry(() =>
           shopify.product.list({
-            query: query,
+            query,
             limit: 250,
             fields: 'id,title,variants,vendor,product_type,tags,status,images'
           })
@@ -799,7 +784,6 @@ async function fetchExistingProducts(productsToSync) {
   return { existingProducts, globalProductMapping };
 }
 
-// Sync a single product to Shopify (upload images only on creation, update stock thereafter)
 async function syncProduct(productData, existingProducts, globalProductMapping, failureLogger) {
   const start = Date.now();
   if (!productData) {
@@ -835,10 +819,9 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
 
     let stockChanged = false;
     let priceChanged = false;
-    let inventoryUpdates = []; // Store inventory updates to apply after product update
+    let inventoryUpdates = [];
 
     if (existingProduct && !FORCE_CREATE) {
-      // For existing products, skip image updates and focus on stock/price
       const existingVariants = existingProduct.variants || [];
       const existingVariantMap = new Map();
       existingVariants.forEach(variant => {
@@ -850,7 +833,7 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
           weight: variant.weight,
           weight_unit: variant.weight_unit,
           option1: variant.option1,
-          inventory_item_id: variant.inventory_item_id // Needed for inventory updates
+          inventory_item_id: variant.inventory_item_id
         });
       });
 
@@ -861,7 +844,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
         variants: [],
       };
 
-      // Preserve existing variants and update stock/price
       for (const existingVariant of existingVariants) {
         const variant = {
           id: existingVariant.id,
@@ -902,7 +884,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
             }
           }
         } else {
-          // New variant, include all details except inventory_quantity
           productSyncLogger.info(`Added new variant for product ${baseSku} variant ${newVariant.sku}: initial stock ${newStock}`);
           updateData.variants.push({
             sku: newVariant.sku,
@@ -933,7 +914,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
       productSyncLogger.info(`Skipped collection and image updates for existing product ${baseSku} (Shopify ID ${existingProduct.id})`);
       global.syncStats.updated++;
 
-      // Apply inventory updates using the inventory_levels endpoint
       if (inventoryUpdates.length > 0) {
         const locationId = await testShopifyConnection();
         if (!locationId) {
@@ -991,12 +971,7 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
         }
       }
 
-      // Save generic code to MongoDB before creating in Shopify
       try {
-        const desiredCollectionIds = productData.collections
-          .map(name => collectionIds[name])
-          .filter(Boolean)
-          .sort();
         await productMappingCollection.updateOne(
           { genericCode: baseSku },
           { $set: { genericCode: baseSku, shopifyProductId: 'PENDING', lastStock: {}, lastPrices: {}, lastImageFilenames: [], createdAt: new Date() } },
@@ -1013,7 +988,7 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
       productSyncLogger.info(`No existing product for ${baseSku}, creating new product...`);
       productData.vendor = 'Smiffys';
       productData.status = 'active';
-      productData.images = await getLocalImages(productData.originalProduct, true); // Upload images on creation
+      productData.images = await getLocalImages(productData.originalProduct, true);
       if (productData.images.length > 0) {
         globalProductMapping[baseSku] = { 
           shopifyProductId: 'PENDING', 
@@ -1032,7 +1007,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
         };
         changedMappings[baseSku] = globalProductMapping[baseSku];
       }
-      // Remove inventory_quantity from creation payload
       productData.variants.forEach(variant => {
         delete variant.inventory_quantity;
       });
@@ -1046,14 +1020,12 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
           priceMap[variant.sku] = parseFloat(variant.price);
         });
 
-        // Fetch the created product to get inventory_item_id for each variant
         const createdProduct = await withRetry(() => shopify.product.get(syncedProduct.id));
         const locationId = await testShopifyConnection();
         if (!locationId) {
           throw new Error(`No location ID available for inventory updates for new product ${baseSku}`);
         }
 
-        // Set initial inventory for new variants
         for (const variant of createdProduct.variants) {
           const matchingVariant = productData.variants.find(v => v.sku === variant.sku);
           if (matchingVariant) {
@@ -1080,7 +1052,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
         changedMappings[baseSku] = globalProductMapping[baseSku];
         global.syncStats.created++;
 
-        // Update MongoDB with the Shopify product ID
         await productMappingCollection.updateOne(
           { genericCode: baseSku },
           { $set: { shopifyProductId: syncedProduct.id, lastStock: stockMap, lastPrices: priceMap, lastImageFilenames: productData.images.map(img => img.filename), updatedAt: new Date() } }
@@ -1108,7 +1079,6 @@ async function syncProduct(productData, existingProducts, globalProductMapping, 
   }
 }
 
-// Fetch Shopify orders
 async function fetchShopifyOrders() {
   const start = Date.now();
   try {
@@ -1129,7 +1099,6 @@ async function fetchShopifyOrders() {
   }
 }
 
-// Transform Shopify order to Smiffys XML format
 function transformOrderToSmiffys(shopifyOrder) {
   const shippingAddress = shopifyOrder.shipping_address || {};
   const defaultAddress = {
@@ -1178,15 +1147,14 @@ function transformOrderToSmiffys(shopifyOrder) {
   return cleanOrderXml;
 }
 
-// Submit order to Smiffys
 async function submitOrderToSmiffys(orderXml) {
   const start = Date.now();
   try {
     const client = await getSmiffysOrdersClient();
     const args = {
-      apiKey: SMIFFYS_API_KEY,
-      clientID: SMIFFYS_CLIENT_ID,
-      orderXml: orderXml
+      apiKey: config.smiffys.apiKey,
+      clientID: config.smiffys.clientId,
+      orderXml
     };
     const result = await new Promise((resolve, reject) => {
       client.SubmitOrder(args, (err, result) => {
@@ -1208,7 +1176,6 @@ async function submitOrderToSmiffys(orderXml) {
   }
 }
 
-// Update Shopify order
 async function updateShopifyOrder(orderId) {
   try {
     const order = await shopify.order.get(orderId, { fields: 'tags' });
@@ -1216,9 +1183,7 @@ async function updateShopifyOrder(orderId) {
     if (!currentTags.includes('sent_to_smiffys')) {
       currentTags.push('sent_to_smiffys');
       await withRetry(() =>
-        shopify.order.update(orderId, {
-          tags: currentTags.join(', ')
-        })
+        shopify.order.update(orderId, { tags: currentTags.join(', ') })
       );
       orderSyncLogger.info(`Updated Shopify order ${orderId} with tag 'sent_to_smiffys'`);
     }
@@ -1228,7 +1193,6 @@ async function updateShopifyOrder(orderId) {
   }
 }
 
-// Mark Shopify order as fulfilled
 async function fulfillShopifyOrder(orderId, lineItems) {
   try {
     const fulfillmentOrders = await withRetry(() =>
@@ -1241,21 +1205,16 @@ async function fulfillShopifyOrder(orderId, lineItems) {
 
     const fulfillmentData = {
       fulfillment: {
-        line_items_by_fulfillment_order: [
-          {
-            fulfillment_order_id: fulfillmentOrder.id,
-            fulfillment_order_line_items: lineItems.map(item => {
-              const fulfillmentOrderLineItem = fulfillmentOrder.line_items.find(li => li.sku === item.sku);
-              if (!fulfillmentOrderLineItem) {
-                throw new Error(`Line item with SKU ${item.sku} not found in fulfillment order ${fulfillmentOrder.id}`);
-              }
-              return {
-                id: fulfillmentOrderLineItem.id,
-                quantity: item.quantity
-              };
-            })
-          }
-        ],
+        line_items_by_fulfillment_order: [{
+          fulfillment_order_id: fulfillmentOrder.id,
+          fulfillment_order_line_items: lineItems.map(item => {
+            const fulfillmentOrderLineItem = fulfillmentOrder.line_items.find(li => li.sku === item.sku);
+            if (!fulfillmentOrderLineItem) {
+              throw new Error(`Line item with SKU ${item.sku} not found in fulfillment order ${fulfillmentOrder.id}`);
+            }
+            return { id: fulfillmentOrderLineItem.id, quantity: item.quantity };
+          })
+        }],
         notify_customer: false,
         status: 'success'
       }
@@ -1271,17 +1230,16 @@ async function fulfillShopifyOrder(orderId, lineItems) {
   }
 }
 
-// Send email with log files and delete them afterward
 async function sendLogEmail(timestamp, duration, syncError) {
   mainLogger.info('Preparing to send log email');
 
   const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
+    host: config.email.smtpHost,
+    port: config.email.smtpPort,
     secure: false,
     auth: {
-      user: SENDER_EMAIL,
-      pass: SENDER_PASSWORD
+      user: config.email.senderEmail,
+      pass: config.email.senderPassword
     }
   });
 
@@ -1302,7 +1260,7 @@ async function sendLogEmail(timestamp, duration, syncError) {
     }
   }
 
-  const emailSubject = EMAIL_SUBJECT_TEMPLATE.replace('{{timestamp}}', timestamp);
+  const emailSubject = config.email.subject;
   const emailBody = `
     <h2>Smiffys to Shopify Sync Completed</h2>
     <p><strong>Timestamp:</strong> ${timestamp}</p>
@@ -1313,21 +1271,20 @@ async function sendLogEmail(timestamp, duration, syncError) {
   `;
 
   const mailOptions = {
-    from: SENDER_EMAIL,
-    to: RECIPIENT_EMAIL,
+    from: config.email.senderEmail,
+    to: config.email.recipientEmail,
     subject: emailSubject,
     html: emailBody,
-    attachments: attachments
+    attachments
   };
 
   try {
     await transporter.sendMail(mailOptions);
-    mainLogger.info(`Log email sent successfully to ${RECIPIENT_EMAIL}`);
+    mainLogger.info(`Log email sent successfully to ${config.email.recipientEmail}`);
 
-    // Delete log files after successful email send
     for (const logFile of logFiles) {
       try {
-        await fs.access(logFile); // Check if file exists
+        await fs.access(logFile);
         await fs.unlink(logFile);
         mainLogger.info(`Deleted log file: ${logFile}`);
       } catch (error) {
@@ -1340,11 +1297,9 @@ async function sendLogEmail(timestamp, duration, syncError) {
     }
   } catch (error) {
     mainLogger.error(`Failed to send log email: ${error.message}`);
-    // Log files are not deleted if email sending fails
   }
 }
 
-// Update product collections (only called during product creation)
 async function updateProductCollections(shopifyProductId, collections) {
   try {
     productSyncLogger.info(`Assigning collections for new product ID: ${shopifyProductId}`);
@@ -1370,15 +1325,12 @@ async function updateProductCollections(shopifyProductId, collections) {
   }
 }
 
-// Product sync function
 async function syncProducts() {
   const startTime = Date.now();
   let syncError = null;
 
-  // Initialize syncStats at the start
   global.syncStats = { created: 0, updated: 0, skipped: 0, failed: 0, deleted: 0 };
 
-  // Initialize failure log file
   const failureLogFile = path.join(LOGS_DIR, `failed_product_uploads_${timestamp}.log`);
   const failureLogger = winston.createLogger({
     level: 'info',
@@ -1403,7 +1355,6 @@ async function syncProducts() {
     const smiffysProducts = await fetchSmiffysProducts();
     const shopifyProducts = await transformSmiffysToShopify(smiffysProducts);
 
-    // Create a set of current generic codes for discontinued product check
     const currentGenericCodes = new Set(shopifyProducts.map(p => p.genericCode));
 
     await cleanUpDuplicates();
@@ -1411,7 +1362,6 @@ async function syncProducts() {
     const { existingProducts, globalProductMapping } = await fetchExistingProducts(shopifyProducts);
     mainLogger.info(`Found ${existingProducts.size} existing products for ${shopifyProducts.length} products to sync`);
 
-    // Remove discontinued products
     await removeDiscontinuedProducts(currentGenericCodes);
 
     if (shopifyProducts.length > 0) {
@@ -1429,12 +1379,10 @@ async function syncProducts() {
         await setTimeoutPromise(REST_RATE_LIMIT_DELAY);
       }
 
-      // Calculate and log the total number of products on the site
       const totalProductsOnSite = global.syncStats.created + global.syncStats.updated + global.syncStats.skipped - global.syncStats.deleted;
       mainLogger.info(`Shopify product sync completed. Total products on site: ${totalProductsOnSite} (Created: ${global.syncStats.created}, Updated: ${global.syncStats.updated}, Skipped: ${global.syncStats.skipped}, Failed: ${global.syncStats.failed}, Deleted: ${global.syncStats.deleted})`);
       productSyncLogger.info(`Total products on site after sync: ${totalProductsOnSite}`);
     } else {
-      // If no products to sync, report existing products minus deleted
       const totalProductsOnSite = existingProducts.size - global.syncStats.deleted;
       mainLogger.info(`No products to sync to Shopify. Total products on site: ${totalProductsOnSite} (Deleted: ${global.syncStats.deleted})`);
       productSyncLogger.info(`Total products on site after sync: ${totalProductsOnSite}`);
@@ -1452,7 +1400,6 @@ async function syncProducts() {
   }
 }
 
-// Order sync function
 async function syncOrders() {
   const startTime = Date.now();
   let syncError = null;
@@ -1477,12 +1424,11 @@ async function syncOrders() {
           orderSyncLogger.info(`Successfully processed order ${order.order_number}`);
         } catch (error) {
           orderSyncLogger.error(`Failed to process order ${order.order_number}: ${error.message}`);
-          // Continue processing the next order instead of failing the entire sync
         }
       }
       mainLogger.info(`Completed order sync. Processed ${shopifyOrders.length} orders`);
     } else {
-      mainLogger.info('No orders to sync to Smiffys');
+      mainLogger.info('No orders to sync to Shopify');
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -1497,7 +1443,6 @@ async function syncOrders() {
   }
 }
 
-// Main function to run based on arguments
 async function main() {
   mainLogger.info('Starting Smiffys to Shopify sync');
   const startTime = Date.now();
